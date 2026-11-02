@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#f7f7f5">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>剪贴板</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --border: #e2e1dc;
+    --text: #1f1f1d;
+    --muted: #77766f;
+    --accent: #0f6e56;
+    --accent-soft: #e1f5ee;
+    --danger: #a32d2d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --surface: #1f1f24;
+      --border: #33333a;
+      --text: #ecebe6;
+      --muted: #9b9a94;
+      --accent: #5dcaa5;
+      --accent-soft: #10362c;
+      --danger: #e08b8b;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 14px 18px 10px;
+    font-size: 15px; font-weight: 500;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; transition: background .2s; }
+  .dot.on { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .dot.err { background: var(--danger); }
+  .status { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: auto; }
+  main { flex: 1; display: flex; flex-direction: column; padding: 0 14px; min-height: 0; }
+  textarea {
+    flex: 1; width: 100%; min-height: 120px; resize: none;
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 14px;
+    padding: 14px; font-size: 17px; line-height: 1.55;
+    font-family: inherit; outline: none;
+  }
+  textarea:focus { border-color: var(--accent); }
+  .bar { display: flex; gap: 10px; padding: 12px 0 8px; align-items: center; }
+  button {
+    font-family: inherit; font-size: 16px; font-weight: 500;
+    border: none; border-radius: 12px; padding: 14px 0;
+    cursor: pointer; transition: opacity .15s;
+  }
+  button:active { opacity: .7; }
+  #send { flex: 1; background: var(--accent); color: #fff; }
+  #send:disabled { opacity: .45; }
+  #clear { width: 84px; background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .hint { text-align: center; font-size: 12px; color: var(--muted); padding-bottom: 6px; height: 18px; }
+  .hint.ok { color: var(--accent); }
+  .hint.bad { color: var(--danger); }
+  section { padding: 0 14px 10px; }
+  .hist-title { font-size: 12px; color: var(--muted); margin: 0 4px 8px; }
+  #hist { display: flex; flex-direction: column; gap: 6px; max-height: 30vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .item {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; font-size: 13px; line-height: 1.45;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .item:active { background: var(--accent-soft); }
+  .empty { font-size: 12px; color: var(--muted); padding: 4px; }
+  #setup { padding: 24px 18px; }
+  #setup h1 { font-size: 17px; font-weight: 500; margin: 0 0 6px; }
+  #setup p { font-size: 13px; color: var(--muted); line-height: 1.6; margin: 0 0 18px; }
+  #setup label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 6px; }
+  #setup input {
+    width: 100%; padding: 12px; font-size: 15px; font-family: ui-monospace, monospace;
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px; outline: none;
+  }
+  #setup input:focus { border-color: var(--accent); }
+  #setup button { width: 100%; margin-top: 18px; background: var(--accent); color: #fff; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="setup" class="hidden">
+  <h1>首次使用，填入配置</h1>
+  <p>在云电脑上运行 gen_config.py，它会打印一段配置链接和这两个值。填一次之后会记住。</p>
+  <label for="cfg-topic">频道</label>
+  <input id="cfg-topic" placeholder="ricoclip/xxxxxxxxxxxxxxxx" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <label for="cfg-key">密钥</label>
+  <input id="cfg-key" placeholder="64 位十六进制" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <button id="cfg-save">保存并连接</button>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <span class="dot" id="dot"></span>
+    <span>剪贴板</span>
+    <span class="status" id="status">连接中</span>
+  </header>
+
+  <main>
+    <textarea id="input" placeholder="在这里打字，点发送后内容会进入云电脑剪贴板" autofocus></textarea>
+    <div class="bar">
+      <button id="clear">清空</button>
+      <button id="send" disabled>发送到云电脑</button>
+    </div>
+    <div class="hint" id="hint"></div>
+  </main>
+
+  <section>
+    <p class="hist-title">最近发送（点击可重发）</p>
+    <div id="hist"><div class="empty">暂无记录</div></div>
+  </section>
+</div>
+
+<script src="https://cdn.bootcdn.net/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/mqtt/5.10.1/mqtt.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // 由 gen_config.py 注入；托管版本保持占位符原样，配置改由链接 fragment 传入
+  var BUILTIN_TOPIC = '__CLIP_TOPIC__';
+  var BUILTIN_KEY = '__CLIP_KEY__';
+  var WS_URL = 'wss://broker-cn.emqx.io:8084/mqtt';
+
+  var CFG_STORE = 'clip_cfg_v1';
+  var HIST_KEY = 'clip_hist_v1';
+  var HIST_MAX = 30;
+
+  function isPlaceholder(v) { return !v || v.indexOf('__CLIP_') === 0; }
+
+  // 配置优先级：链接 fragment > 本地存储 > 模板内置
+  function resolveConfig() {
+    var hash = location.hash.replace(/^#/, '');
+    if (hash) {
+      var params = new URLSearchParams(hash);
+      var t = params.get('t');
+      var k = params.get('k');
+      if (t && k) {
+        try { localStorage.setItem(CFG_STORE, JSON.stringify({ t: t, k: k })); } catch (e) {}
+        history.replaceState(null, '', location.pathname + location.search);
+        return { t: t, k: k };
+      }
+    }
+    try {
+      var saved = JSON.parse(localStorage.getItem(CFG_STORE) || 'null');
+      if (saved && saved.t && saved.k) return saved;
+    } catch (e) {}
+    if (!isPlaceholder(BUILTIN_TOPIC) && !isPlaceholder(BUILTIN_KEY)) {
+      return { t: BUILTIN_TOPIC, k: BUILTIN_KEY };
+    }
+    return null;
+  }
+
+  var cfg = resolveConfig();
+
+  function showSetup() {
+    document.getElementById('setup').classList.remove('hidden');
+    document.getElementById('app').classList.add('hidden');
+    var tEl = document.getElementById('cfg-topic');
+    var kEl = document.getElementById('cfg-key');
+    document.getElementById('cfg-save').addEventListener('click', function () {
+      var t = tEl.value.trim();
+      var k = kEl.value.trim();
+      if (!t || !k) { alert('两个都要填'); return; }
+      try { localStorage.setItem(CFG_STORE, JSON.stringify({ t: t, k: k })); } catch (e) {}
+      location.reload();
+    });
+  }
+
+  if (!cfg) { showSetup(); return; }
+
+  document.getElementById('app').classList.remove('hidden');
+
+  var input = document.getElementById('input');
+  var sendBtn = document.getElementById('send');
+  var clearBtn = document.getElementById('clear');
+  var hint = document.getElementById('hint');
+  var dot = document.getElementById('dot');
+  var statusEl = document.getElementById('status');
+  var histEl = document.getElementById('hist');
+
+  var client = null;
+  var online = false;
+  var keyWA = null;
+  var TOPIC = cfg.t;
+
+  if (typeof CryptoJS === 'undefined' || typeof mqtt === 'undefined') {
+    hint.textContent = '依赖加载失败，检查网络后刷新';
+    hint.className = 'hint bad';
+    statusEl.textContent = '加载失败';
+    dot.className = 'dot err';
+    return;
+  }
+  keyWA = CryptoJS.enc.Hex.parse(cfg.k);
+
+  function setHint(text, kind) {
+    hint.textContent = text || '';
+    hint.className = 'hint' + (kind ? ' ' + kind : '');
+    if (text) {
+      clearTimeout(setHint._t);
+      setHint._t = setTimeout(function () { hint.textContent = ''; hint.className = 'hint'; }, 3000);
+    }
+  }
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    dot.className = 'dot' + (cls ? ' ' + cls : '');
+  }
+
+  function encrypt(obj) {
+    var iv = CryptoJS.lib.WordArray.random(16);
+    var enc = CryptoJS.AES.encrypt(JSON.stringify(obj), keyWA, {
+      iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+    });
+    var ct = enc.ciphertext;
+    var mac = CryptoJS.HmacSHA256(iv.clone().concat(ct.clone()), keyWA);
+    return CryptoJS.enc.Base64.stringify(iv.clone().concat(ct.clone()).concat(mac));
+  }
+
+  function newId() { return CryptoJS.enc.Hex.stringify(CryptoJS.lib.WordArray.random(12)); }
+
+  function loadHist() {
+    try { return JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); } catch (e) { return []; }
+  }
+  function saveHist(list) {
+    try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); } catch (e) {}
+  }
+  function renderHist() {
+    var list = loadHist();
+    histEl.innerHTML = '';
+    if (!list.length) {
+      var d = document.createElement('div');
+      d.className = 'empty';
+      d.textContent = '暂无记录';
+      histEl.appendChild(d);
+      return;
+    }
+    list.forEach(function (text) {
+      var el = document.createElement('div');
+      el.className = 'item';
+      el.textContent = text;
+      el.addEventListener('click', function () { input.value = text; input.focus(); });
+      histEl.appendChild(el);
+    });
+  }
+  function pushHist(text) {
+    var list = loadHist().filter(function (x) { return x !== text; });
+    list.unshift(text);
+    saveHist(list);
+    renderHist();
+  }
+
+  function send() {
+    var text = input.value;
+    if (!text.trim()) { setHint('内容为空', 'bad'); return; }
+    if (!online) { setHint('未连接，稍后再试', 'bad'); return; }
+    var payload = encrypt({ id: newId(), ts: Date.now(), text: text });
+    client.publish(TOPIC + '/up', payload, { qos: 1 }, function (err) {
+      if (err) { setHint('发送失败：' + err.message, 'bad'); return; }
+      setHint('已发送', 'ok');
+      pushHist(text);
+      input.value = '';
+      input.focus();
+    });
+  }
+
+  sendBtn.addEventListener('click', send);
+  clearBtn.addEventListener('click', function () { input.value = ''; input.focus(); });
+  input.addEventListener('keydown', function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
+  });
+
+  try {
+    client = mqtt.connect(WS_URL, {
+      clientId: 'clipweb-' + Math.random().toString(16).slice(2, 10),
+      clean: true,
+      reconnectPeriod: 4000,
+      connectTimeout: 8000,
+      keepalive: 30
+    });
+  } catch (e) {
+    setStatus('连接异常', 'err');
+    setHint('无法创建连接：' + e.message, 'bad');
+    return;
+  }
+
+  client.on('connect', function () {
+    online = true;
+    sendBtn.disabled = false;
+    setStatus('云电脑在线', 'on');
+    client.subscribe(TOPIC + '/down', { qos: 0 });
+  });
+  client.on('reconnect', function () { setStatus('重连中'); });
+  client.on('close', function () {
+    online = false;
+    sendBtn.disabled = true;
+    setStatus('未连接', 'err');
+  });
+  client.on('error', function (e) {
+    setStatus('连接失败', 'err');
+    setHint('网络异常：' + (e && e.message ? e.message : e), 'bad');
+  });
+  client.on('message', function (topic, payload) {
+    if (topic !== TOPIC + '/down') return;
+    try {
+      var msg = JSON.parse(payload.toString());
+      if (msg.event === 'ack') setHint('云电脑已接收', 'ok');
+      if (msg.event === 'online') setStatus('云电脑在线', 'on');
+    } catch (e) {}
+  });
+
+  renderHist();
+})();
+</script>
+</body>
+</html>
