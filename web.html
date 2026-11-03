@@ -6,6 +6,9 @@
 <meta name="theme-color" content="#f7f7f5">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="referrer" content="no-referrer">
+<!-- 只允许加载同源脚本、只允许连指定 broker。密钥存在本机，这条能挡住绝大多数注入窃取 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' wss://broker-cn.emqx.io:8084; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <title>剪贴板</title>
 <style>
   :root {
@@ -129,10 +132,11 @@
   </section>
 </div>
 
-<script src="https://cdn.bootcdn.net/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
-<script src="https://cdn.bootcdn.net/ajax/libs/mqtt/5.10.1/mqtt.min.js"></script>
+<!-- 同源加载，复用已建立的 TLS 连接；Cloudflare 会压缩传输 -->
+<link rel="preload" href="mqtt.min.js" as="script">
+<script src="mqtt.min.js" defer></script>
 <script>
-(function () {
+window.addEventListener('DOMContentLoaded', function () {
   'use strict';
 
   // 由 gen_config.py 注入；托管版本保持占位符原样，配置改由链接 fragment 传入
@@ -199,17 +203,7 @@
 
   var client = null;
   var online = false;
-  var keyWA = null;
   var TOPIC = cfg.t;
-
-  if (typeof CryptoJS === 'undefined' || typeof mqtt === 'undefined') {
-    hint.textContent = '依赖加载失败，检查网络后刷新';
-    hint.className = 'hint bad';
-    statusEl.textContent = '加载失败';
-    dot.className = 'dot err';
-    return;
-  }
-  keyWA = CryptoJS.enc.Hex.parse(cfg.k);
 
   function setHint(text, kind) {
     hint.textContent = text || '';
@@ -225,17 +219,66 @@
     dot.className = 'dot' + (cls ? ' ' + cls : '');
   }
 
-  function encrypt(obj) {
-    var iv = CryptoJS.lib.WordArray.random(16);
-    var enc = CryptoJS.AES.encrypt(JSON.stringify(obj), keyWA, {
-      iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
-    });
-    var ct = enc.ciphertext;
-    var mac = CryptoJS.HmacSHA256(iv.clone().concat(ct.clone()), keyWA);
-    return CryptoJS.enc.Base64.stringify(iv.clone().concat(ct.clone()).concat(mac));
+  // ---------------------------------------------------------------------
+  // 加密：浏览器原生 Web Crypto（AES-256-CBC + HMAC-SHA256），与 Python 端一致
+  // ---------------------------------------------------------------------
+  // 用原生实现而不是 crypto-js，省掉 60KB 第三方库，也少一个可被投毒的依赖。
+  // 只在安全上下文（HTTPS）可用，file:// 打开会走下面的降级提示。
+
+  var encKey = null;
+  var macKey = null;
+
+  function hexToBytes(hex) {
+    var out = new Uint8Array(hex.length / 2);
+    for (var i = 0; i < out.length; i++) {
+      out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    }
+    return out;
   }
 
-  function newId() { return CryptoJS.enc.Hex.stringify(CryptoJS.lib.WordArray.random(12)); }
+  function toBase64(bytes) {
+    var s = '';
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(s);
+  }
+
+  function newId() {
+    var b = crypto.getRandomValues(new Uint8Array(12));
+    var s = '';
+    for (var i = 0; i < b.length; i++) s += ('0' + b[i].toString(16)).slice(-2);
+    return s;
+  }
+
+  function initCrypto(hexKey) {
+    var raw = hexToBytes(hexKey);
+    return Promise.all([
+      crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['encrypt']),
+      crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+    ]).then(function (keys) {
+      encKey = keys[0];
+      macKey = keys[1];
+    });
+  }
+
+  function encrypt(obj) {
+    var iv = crypto.getRandomValues(new Uint8Array(16));
+    var plain = new TextEncoder().encode(JSON.stringify(obj));
+    return crypto.subtle.encrypt({ name: 'AES-CBC', iv: iv }, encKey, plain).then(function (buf) {
+      var ct = new Uint8Array(buf);
+      var body = new Uint8Array(16 + ct.length);
+      body.set(iv, 0);
+      body.set(ct, 16);
+      return crypto.subtle.sign('HMAC', macKey, body).then(function (sig) {
+        var mac = new Uint8Array(sig);
+        var out = new Uint8Array(body.length + mac.length);
+        out.set(body, 0);
+        out.set(mac, body.length);
+        return toBase64(out);
+      });
+    });
+  }
 
   function loadHist() {
     try { return JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); } catch (e) { return []; }
@@ -272,13 +315,19 @@
     var text = input.value;
     if (!text.trim()) { setHint('内容为空', 'bad'); return; }
     if (!online) { setHint('未连接，稍后再试', 'bad'); return; }
-    var payload = encrypt({ id: newId(), ts: Date.now(), text: text });
-    client.publish(TOPIC + '/up', payload, { qos: 1 }, function (err) {
-      if (err) { setHint('发送失败：' + err.message, 'bad'); return; }
-      setHint('已发送', 'ok');
-      pushHist(text);
-      input.value = '';
-      input.focus();
+    sendBtn.disabled = true;
+    encrypt({ id: newId(), ts: Date.now(), text: text }).then(function (payload) {
+      client.publish(TOPIC + '/up', payload, { qos: 1 }, function (err) {
+        sendBtn.disabled = false;
+        if (err) { setHint('发送失败：' + err.message, 'bad'); return; }
+        setHint('已发送', 'ok');
+        pushHist(text);
+        input.value = '';
+        input.focus();
+      });
+    }).catch(function (e) {
+      sendBtn.disabled = false;
+      setHint('加密失败：' + e.message, 'bad');
     });
   }
 
@@ -288,47 +337,68 @@
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
   });
 
-  try {
-    client = mqtt.connect(WS_URL, {
-      clientId: 'clipweb-' + Math.random().toString(16).slice(2, 10),
-      clean: true,
-      reconnectPeriod: 4000,
-      connectTimeout: 8000,
-      keepalive: 30
-    });
-  } catch (e) {
-    setStatus('连接异常', 'err');
-    setHint('无法创建连接：' + e.message, 'bad');
+  renderHist();
+
+  // ---------------------------------------------------------------------
+  // 启动：先备好密钥，再连 broker
+  // ---------------------------------------------------------------------
+
+  if (typeof mqtt === 'undefined') {
+    setHint('依赖加载失败，检查网络后刷新', 'bad');
+    setStatus('加载失败', 'err');
+    return;
+  }
+  if (!window.crypto || !window.crypto.subtle) {
+    // file:// 打开或非 HTTPS 时 Web Crypto 不可用
+    setHint('请用 HTTPS 地址打开本页', 'bad');
+    setStatus('环境不支持', 'err');
     return;
   }
 
-  client.on('connect', function () {
-    online = true;
-    sendBtn.disabled = false;
-    setStatus('云电脑在线', 'on');
-    client.subscribe(TOPIC + '/down', { qos: 0 });
-  });
-  client.on('reconnect', function () { setStatus('重连中'); });
-  client.on('close', function () {
-    online = false;
-    sendBtn.disabled = true;
-    setStatus('未连接', 'err');
-  });
-  client.on('error', function (e) {
-    setStatus('连接失败', 'err');
-    setHint('网络异常：' + (e && e.message ? e.message : e), 'bad');
-  });
-  client.on('message', function (topic, payload) {
-    if (topic !== TOPIC + '/down') return;
+  initCrypto(cfg.k).then(function () {
     try {
-      var msg = JSON.parse(payload.toString());
-      if (msg.event === 'ack') setHint('云电脑已接收', 'ok');
-      if (msg.event === 'online') setStatus('云电脑在线', 'on');
-    } catch (e) {}
-  });
+      client = mqtt.connect(WS_URL, {
+        clientId: 'clipweb-' + Math.random().toString(16).slice(2, 10),
+        clean: true,
+        reconnectPeriod: 4000,
+        connectTimeout: 8000,
+        keepalive: 30
+      });
+    } catch (e) {
+      setStatus('连接异常', 'err');
+      setHint('无法创建连接：' + e.message, 'bad');
+      return;
+    }
 
-  renderHist();
-})();
+    client.on('connect', function () {
+      online = true;
+      sendBtn.disabled = false;
+      setStatus('云电脑在线', 'on');
+      client.subscribe(TOPIC + '/down', { qos: 0 });
+    });
+    client.on('reconnect', function () { setStatus('重连中'); });
+    client.on('close', function () {
+      online = false;
+      sendBtn.disabled = true;
+      setStatus('未连接', 'err');
+    });
+    client.on('error', function (e) {
+      setStatus('连接失败', 'err');
+      setHint('网络异常：' + (e && e.message ? e.message : e), 'bad');
+    });
+    client.on('message', function (topic, payload) {
+      if (topic !== TOPIC + '/down') return;
+      try {
+        var msg = JSON.parse(payload.toString());
+        if (msg.event === 'ack') setHint('云电脑已接收', 'ok');
+        if (msg.event === 'online') setStatus('云电脑在线', 'on');
+      } catch (e) {}
+    });
+  }).catch(function (e) {
+    setStatus('密钥无效', 'err');
+    setHint('配置有误：' + e.message, 'bad');
+  });
+});
 </script>
 </body>
 </html>
