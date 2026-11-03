@@ -7,8 +7,11 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="referrer" content="no-referrer">
-<!-- 只允许加载同源脚本、只允许连指定 broker。密钥存在本机，这条能挡住绝大多数注入窃取 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' wss://broker-cn.emqx.io:8084; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<link rel="icon" href="data:,">
+<!-- 只允许加载同源脚本、只允许连指定 broker。密钥存在本机，这条能挡住绝大多数注入窃取。
+     worker-src blob: 是给 mqtt.js 的心跳计时器用的——它在后台标签页用 blob worker
+     绕开浏览器对 setInterval 的节流，没有它切到后台会掉线。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; worker-src 'self' blob:; style-src 'unsafe-inline'; connect-src 'self' wss://broker-cn.emqx.io:8084; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <title>剪贴板</title>
 <style>
   :root {
