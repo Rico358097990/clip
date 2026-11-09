@@ -46,6 +46,7 @@
     flex-direction: column;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
+  #app { flex: 1; display: flex; flex-direction: column; }
   header {
     display: flex; align-items: center; gap: 8px;
     padding: 14px 18px 10px;
@@ -55,7 +56,7 @@
   .dot.on { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .dot.err { background: var(--danger); }
   .status { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: auto; }
-  main { flex: 1; display: flex; flex-direction: column; padding: 0 14px; min-height: 0; }
+  main { flex: 1; display: flex; flex-direction: column; padding: 0 14px; }
   textarea {
     flex: 1; width: 100%; min-height: 120px; resize: none;
     background: var(--surface); color: var(--text);
@@ -78,9 +79,13 @@
   .hint.ok { color: var(--accent); }
   .hint.bad { color: var(--danger); }
   section { padding: 0 14px 10px; }
-  .hist-title { font-size: 12px; color: var(--muted); margin: 0 4px 8px; }
+  .hist-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 4px 8px; }
+  .hist-title { font-size: 12px; color: var(--muted); margin: 0; }
+  #clear-hist { flex: none; padding: 8px 4px; background: transparent; color: var(--muted); font-size: 12px; }
+  #clear-hist:disabled { opacity: .45; cursor: default; }
   #hist { display: flex; flex-direction: column; gap: 6px; max-height: 30vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   .item {
+    flex-shrink: 0; /* 超出列表高度时滚动，不压缩每条记录的文字。 */
     background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
     padding: 10px 12px; font-size: 13px; line-height: 1.45;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -130,7 +135,10 @@
   </main>
 
   <section>
-    <p class="hist-title">最近发送（点击可重发）</p>
+    <div class="hist-header">
+      <p class="hist-title">最近发送（点击可重发）</p>
+      <button id="clear-hist" type="button" disabled>清空历史</button>
+    </div>
     <div id="hist"><div class="empty">暂无记录</div></div>
   </section>
 </div>
@@ -199,6 +207,7 @@ window.addEventListener('DOMContentLoaded', function () {
   var input = document.getElementById('input');
   var sendBtn = document.getElementById('send');
   var clearBtn = document.getElementById('clear');
+  var clearHistBtn = document.getElementById('clear-hist');
   var hint = document.getElementById('hint');
   var dot = document.getElementById('dot');
   var statusEl = document.getElementById('status');
@@ -291,6 +300,7 @@ window.addEventListener('DOMContentLoaded', function () {
   }
   function renderHist() {
     var list = loadHist();
+    clearHistBtn.disabled = !list.length;
     histEl.innerHTML = '';
     if (!list.length) {
       var d = document.createElement('div');
@@ -336,6 +346,16 @@ window.addEventListener('DOMContentLoaded', function () {
 
   sendBtn.addEventListener('click', send);
   clearBtn.addEventListener('click', function () { input.value = ''; input.focus(); });
+  clearHistBtn.addEventListener('click', function () {
+    try {
+      localStorage.removeItem(HIST_KEY);
+    } catch (e) {
+      setHint('清空失败，请稍后重试', 'bad');
+      return;
+    }
+    renderHist();
+    setHint('历史记录已清空', 'ok');
+  });
   input.addEventListener('keydown', function (e) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
   });
